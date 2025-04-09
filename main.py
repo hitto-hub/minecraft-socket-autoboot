@@ -150,16 +150,40 @@ def main():
         logging.exception("main: 受け取ったソケットのオープンに失敗しました。")
         sys.exit(1)
 
+    # Docker Compose を使ってサーバーの起動確認・起動
     ensure_minecraft_server_running()
     wait_for_server()
 
-    # TCPレベルでは接続できたので、アプリケーション初期化の完了待ちのために追加待機
+    # --- クライアントからの初期データをバッファリング ---
+    # ノンブロッキングモードにして、受信可能な初期データを読み取る
+    sock_in.setblocking(0)
+    try:
+        initial_data = sock_in.recv(4096)
+    except BlockingIOError:
+        initial_data = b""
+    except Exception:
+        logging.exception("main: クライアントから初期データを読み込めませんでした。")
+        initial_data = b""
+    finally:
+        # 再びブロッキングモードに戻す
+        sock_in.setblocking(1)
+    logging.info("初期データのサイズ: %d bytes", len(initial_data))
+    
+    # TCP接続確認後、アプリケーション初期化のために追加待機
     logging.info("TCP接続確認後、アプリケーション初期化のために %d 秒待機します。", WAIT_AFTER_TCP)
     time.sleep(WAIT_AFTER_TCP)
-
+    
     logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
     sock_out = connect_to_server_with_retry()
 
+    # バッファしておいた初期データがあればすぐに送信
+    if initial_data:
+        try:
+            sock_out.sendall(initial_data)
+            logging.info("初期データをサーバーへ転送しました。")
+        except Exception:
+            logging.exception("初期データの転送に失敗しました。")
+    
     try:
         forward_data(sock_in, sock_out)
     finally:
