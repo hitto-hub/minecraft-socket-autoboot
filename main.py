@@ -7,6 +7,7 @@ import select
 import subprocess
 import logging
 import signal
+from mcstatus import JavaServer
 
 # --- ログの設定 ---
 logging.basicConfig(
@@ -20,9 +21,10 @@ COMPOSE_FILE = '/home/hitto/mc/compose.yaml'
 TARGET_HOST = '127.0.0.1'
 TARGET_PORT = 25564         # Docker コンテナ側のポート（systemd のソケットと被らないように設定）
 POLL_INTERVAL = 2           # サーバー待機のポーリング間隔（秒）
-WAIT_AFTER_TCP = 3          # TCP接続確認後に追加で待機する秒数
+WAIT_AFTER_TCP = 3          # TCP 接続確認後に追加で待機する秒数
 CONNECT_RETRIES = 3         # 接続確立試行回数
 CONNECT_RETRY_DELAY = 2     # 接続試行間の待機秒数
+SERVER_READY_TIMEOUT = 60   # mcstatus によるサーバー起動完了待ちのタイムアウト（秒）
 
 # --- シャットダウンフラグとシグナルハンドラー ---
 shutdown_flag = False
@@ -71,21 +73,25 @@ def start_minecraft_server():
         logging.exception("docker compose up の実行中に例外が発生しました。")
         sys.exit(1)
 
-# --- サーバーが接続可能になるまで待機 ---
-def wait_for_server():
-    logging.info("Minecraft サーバーが %s:%d で接続可能になるのを待ちます。", TARGET_HOST, TARGET_PORT)
-    while not shutdown_flag:
+# --- サーバーがプロトコルレベルで起動完了するまで待機（mcstatus を使用） ---
+def wait_for_server_ready(host, port, timeout=SERVER_READY_TIMEOUT):
+    logging.info("mcstatus を使用して、Minecraft サーバーの起動完了（プロトコルレベル）を待ちます。")
+    server = JavaServer.lookup(f"{host}:{port}")
+    start_time = time.time()
+    while time.time() - start_time < timeout and not shutdown_flag:
         try:
-            with socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=5):
-                logging.info("Minecraft サーバーが起動し、接続可能になりました。")
-                return
+            # サーバーに ping を送り、ステータス取得を試みる
+            status = server.status()
+            if status.version.name:
+                logging.info("Minecraft サーバーが起動しました: バージョン %s", status.version.name)
+                return True
         except Exception as e:
-            logging.debug("サーバーはまだ接続可能ではありません: %s", e)
-            time.sleep(POLL_INTERVAL)
-    logging.info("シャットダウンフラグが立ったため、wait_for_server を終了します。")
-    sys.exit(0)
+            logging.debug("Minecraft サーバーの起動確認中: %s", e)
+        time.sleep(2)
+    logging.error("指定したタイムアウト内に Minecraft サーバーの起動確認ができませんでした。")
+    return False
 
-# --- Docker Compose 状態の確認・起動 ---
+# --- docker compose 状態の確認・起動 ---
 def ensure_minecraft_server_running():
     if not is_minecraft_running():
         start_minecraft_server()
@@ -150,12 +156,31 @@ def main():
         logging.exception("main: 受け取ったソケットのオープンに失敗しました。")
         sys.exit(1)
 
-    # Docker Compose を使ってサーバーの起動確認・起動
+    # Docker Compose によるサーバー状態確認・起動
     ensure_minecraft_server_running()
-    wait_for_server()
 
-    # --- クライアントからの初期データをバッファリング ---
-    # ノンブロッキングモードにして、受信可能な初期データを読み取る
+    # TCP 接続可能の確認
+    logging.info("Minecraft サーバーが %s:%d で TCP 接続可能になるのを待ちます。", TARGET_HOST, TARGET_PORT)
+    while not shutdown_flag:
+        try:
+            with socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=5):
+                logging.info("TCP 接続が確認されました。")
+                break
+        except Exception as e:
+            logging.debug("TCP 接続待機中: %s", e)
+            time.sleep(POLL_INTERVAL)
+    if shutdown_flag:
+        sys.exit(0)
+
+    # mcstatus によるサーバー起動完了待ち
+    if not wait_for_server_ready(TARGET_HOST, TARGET_PORT):
+        sys.exit(1)
+
+    # TCP 接続確認後、アプリケーション初期化のために追加待機
+    logging.info("TCP 接続確認後、アプリケーション初期化のために %d 秒待機します。", WAIT_AFTER_TCP)
+    time.sleep(WAIT_AFTER_TCP)
+
+    # クライアントからの初期データをバッファリング（ハンドシェイク等のデータがある可能性）
     sock_in.setblocking(0)
     try:
         initial_data = sock_in.recv(4096)
@@ -165,18 +190,13 @@ def main():
         logging.exception("main: クライアントから初期データを読み込めませんでした。")
         initial_data = b""
     finally:
-        # 再びブロッキングモードに戻す
         sock_in.setblocking(1)
     logging.info("初期データのサイズ: %d bytes", len(initial_data))
-    
-    # TCP接続確認後、アプリケーション初期化のために追加待機
-    logging.info("TCP接続確認後、アプリケーション初期化のために %d 秒待機します。", WAIT_AFTER_TCP)
-    time.sleep(WAIT_AFTER_TCP)
     
     logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
     sock_out = connect_to_server_with_retry()
 
-    # バッファしておいた初期データがあればすぐに送信
+    # もし初期データがあれば、すぐにサーバーへ送信
     if initial_data:
         try:
             sock_out.sendall(initial_data)
