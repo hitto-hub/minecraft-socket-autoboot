@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # --- 設定値 ---
-COMPOSE_FILE = '/home/hitto/mc/compose.yaml'
+COMPOSE_FILE = '/opt/minecraft-on-demand/compose.yaml'
 TARGET_HOST = '127.0.0.1'
 TARGET_PORT = 25564         # Docker コンテナ側のポート（systemd のソケットと被らないように設定）
 POLL_INTERVAL = 2           # サーバー待機のポーリング間隔（秒）
@@ -226,7 +226,7 @@ def main():
     finally:
         sock_in.setblocking(1)
     logging.info("初期データのサイズ: %d bytes", len(initial_data))
-    
+
     logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
     sock_out = connect_to_server_with_retry()
 
@@ -237,7 +237,7 @@ def main():
             logging.info("初期データをサーバーへ転送しました。")
         except Exception:
             logging.exception("初期データの転送に失敗しました。")
-    
+
     try:
         forward_data(sock_in, sock_out)
     finally:
