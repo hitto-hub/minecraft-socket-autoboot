@@ -1,3 +1,4 @@
+```bash
 /etc/systemd/system/minecraft-on-demand.socket
 /etc/systemd/system/minecraft-on-demand@.service
 /home/hitto/mc/main.py
@@ -13,3 +14,4 @@ sudo systemctl daemon-reload
 sudo systemctl enable minecraft-on-demand.socket
 sudo systemctl start minecraft-on-demand.socket
 sudo systemctl status minecraft-on-demand.socket
+```
