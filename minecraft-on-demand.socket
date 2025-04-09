@@ -1,0 +1,9 @@
+[Unit]
+Description=On-demand Minecraft socket
+
+[Socket]
+ListenStream=25565
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
