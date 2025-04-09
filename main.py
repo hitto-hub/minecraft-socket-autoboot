@@ -6,6 +6,7 @@ import time
 import select
 import subprocess
 import logging
+import signal
 
 # --- ログの設定 ---
 logging.basicConfig(
@@ -17,8 +18,22 @@ logging.basicConfig(
 # --- 設定値 ---
 COMPOSE_FILE = '/home/hitto/mc/compose.yaml'
 TARGET_HOST = '127.0.0.1'
-TARGET_PORT = 25564    # Docker コンテナ側のポート（systemd のソケットと被らないように設定）
-POLL_INTERVAL = 2
+TARGET_PORT = 25564         # Docker コンテナ側のポート（systemd のソケットと被らないように設定）
+POLL_INTERVAL = 2           # サーバー待機のポーリング間隔（秒）
+WAIT_AFTER_TCP = 3          # TCP接続確認後に追加で待機する秒数
+CONNECT_RETRIES = 3         # 接続確立試行回数
+CONNECT_RETRY_DELAY = 2     # 接続試行間の待機秒数
+
+# --- シャットダウンフラグとシグナルハンドラー ---
+shutdown_flag = False
+
+def signal_handler(signum, frame):
+    global shutdown_flag
+    logging.info("シグナル %s を受信しました。終了処理を開始します。", signum)
+    shutdown_flag = True
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 # --- Docker Compose サーバーの稼働状況確認 ---
 def is_minecraft_running():
@@ -59,7 +74,7 @@ def start_minecraft_server():
 # --- サーバーが接続可能になるまで待機 ---
 def wait_for_server():
     logging.info("Minecraft サーバーが %s:%d で接続可能になるのを待ちます。", TARGET_HOST, TARGET_PORT)
-    while True:
+    while not shutdown_flag:
         try:
             with socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=5):
                 logging.info("Minecraft サーバーが起動し、接続可能になりました。")
@@ -67,13 +82,31 @@ def wait_for_server():
         except Exception as e:
             logging.debug("サーバーはまだ接続可能ではありません: %s", e)
             time.sleep(POLL_INTERVAL)
+    logging.info("シャットダウンフラグが立ったため、wait_for_server を終了します。")
+    sys.exit(0)
 
-# --- docker compose 状態の確認・起動 ---
+# --- Docker Compose 状態の確認・起動 ---
 def ensure_minecraft_server_running():
     if not is_minecraft_running():
         start_minecraft_server()
     else:
         logging.info("既に Minecraft サーバーは実行中です。")
+
+# --- 接続確立のための再試行 ---
+def connect_to_server_with_retry(retries=CONNECT_RETRIES, delay=CONNECT_RETRY_DELAY):
+    attempt = 0
+    while attempt < retries and not shutdown_flag:
+        try:
+            sock = socket.create_connection((TARGET_HOST, TARGET_PORT))
+            logging.info("Minecraft サーバーへの接続に成功しました。")
+            return sock
+        except Exception as e:
+            attempt += 1
+            logging.warning("接続試行 %d/%d に失敗しました: %s。%d秒後に再試行します。",
+                            attempt, retries, e, delay)
+            time.sleep(delay)
+    logging.error("Minecraft サーバーへの接続に %d 回失敗しました。", retries)
+    sys.exit(1)
 
 # --- ソケット間の双方向データ転送 ---
 def forward_data(src, dst):
@@ -81,7 +114,7 @@ def forward_data(src, dst):
     src.setblocking(0)
     dst.setblocking(0)
     sockets = [src, dst]
-    while True:
+    while not shutdown_flag:
         try:
             r, _, x = select.select(sockets, [], sockets, 1)
             if x:
@@ -120,18 +153,19 @@ def main():
     ensure_minecraft_server_running()
     wait_for_server()
 
-    logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
-    try:
-        sock_out = socket.create_connection((TARGET_HOST, TARGET_PORT))
-        logging.info("main: Minecraft サーバーへの接続に成功しました。")
-    except Exception:
-        logging.exception("main: Minecraft サーバーへの接続に失敗しました。")
-        sys.exit(1)
+    # TCPレベルでは接続できたので、アプリケーション初期化の完了待ちのために追加待機
+    logging.info("TCP接続確認後、アプリケーション初期化のために %d 秒待機します。", WAIT_AFTER_TCP)
+    time.sleep(WAIT_AFTER_TCP)
 
-    forward_data(sock_in, sock_out)
-    sock_in.close()
-    sock_out.close()
-    logging.info("main: 接続をクローズしました。")
+    logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
+    sock_out = connect_to_server_with_retry()
+
+    try:
+        forward_data(sock_in, sock_out)
+    finally:
+        sock_in.close()
+        sock_out.close()
+        logging.info("main: 接続をクローズしました。")
 
 if __name__ == "__main__":
     main()
