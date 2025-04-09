@@ -146,6 +146,40 @@ def forward_data(src, dst):
             logging.exception("forward_data: 例外が発生しました。")
             return
 
+# --- systemd socket の接続数を取得 ---
+def get_socket_connected_count():
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "minecraft-on-demand.socket", "-p", "NConnections"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            logging.error("socket 接続数チェックに失敗: %s", result.stderr)
+            return None
+        for line in result.stdout.splitlines():
+            if line.startswith("NConnections="):
+                key, value = line.split("=", 1)
+                return int(value.strip())
+        return None
+    except Exception:
+        logging.exception("socket 接続数チェック中に例外が発生しました。")
+        return None
+
+# --- Minecraft サーバーの停止処理 ---
+def shutdown_minecraft_server():
+    logging.info("全ての接続が切断されました。Minecraft サーバーを停止します。")
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-f", COMPOSE_FILE, "stop"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            logging.info("Minecraft サーバーを正常に停止しました。")
+        else:
+            logging.error("サーバー停止に失敗: %s", result.stderr)
+    except Exception:
+        logging.exception("Minecraft サーバー停止中に例外が発生しました。")
+
 def main():
     logging.debug("main: systemd から渡されたソケットを取得します。")
     try:
@@ -210,6 +244,18 @@ def main():
         sock_in.close()
         sock_out.close()
         logging.info("main: 接続をクローズしました。")
+
+    # 接続終了後に systemctl show により接続数をチェックする
+    count = get_socket_connected_count()
+    if count is not None:
+        logging.info("現在の socket 接続数: %d", count)
+        # 接続数が 1 なら、自分以外の接続はないと判断してサーバーを停止する
+        if count <= 1:
+            shutdown_minecraft_server()
+        else:
+            logging.info("接続が残っているため、サーバー停止はスキップします。")
+    else:
+        logging.error("socket 接続数の取得に失敗したため、サーバー停止処理は実行されません。")
 
 if __name__ == "__main__":
     main()
