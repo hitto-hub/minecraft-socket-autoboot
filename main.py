@@ -15,12 +15,9 @@ logging.basicConfig(
 )
 
 # --- 設定値 ---
-# Docker Compose のファイルパス
 COMPOSE_FILE = '/home/hitto/mc/compose.yaml'
-# 接続先（Docker で起動される Minecraft サーバー）が待ち受けるホストとポート
 TARGET_HOST = '127.0.0.1'
-TARGET_PORT = 25564    # ※ systemd ソケットが 25565 で受け付けるため、別ポートにする例
-# サーバー起動待ちのポーリング間隔（秒）
+TARGET_PORT = 25564    # Docker コンテナ側のポート（systemd のソケットと被らないように設定）
 POLL_INTERVAL = 2
 
 # --- Docker Compose サーバーの稼働状況確認 ---
@@ -35,11 +32,10 @@ def is_minecraft_running():
         if result.returncode != 0:
             logging.error("docker compose ps に失敗しました: %s", result.stderr)
             return False
-        # 出力が空の場合、実行中のコンテナが無いと判断する
         output = result.stdout.strip()
         logging.debug("docker compose ps の出力: '%s'", output)
         return bool(output)
-    except Exception as e:
+    except Exception:
         logging.exception("Docker Compose の状態確認中に例外が発生しました。")
         return False
 
@@ -56,7 +52,7 @@ def start_minecraft_server():
             logging.error("docker compose up に失敗しました: %s", result.stderr)
             sys.exit(1)
         logging.info("docker compose up の実行が完了しました。")
-    except Exception as e:
+    except Exception:
         logging.exception("docker compose up の実行中に例外が発生しました。")
         sys.exit(1)
 
@@ -94,44 +90,44 @@ def forward_data(src, dst):
             if not r:
                 continue
             for sock in r:
-                data = sock.recv(4096)
+                try:
+                    data = sock.recv(4096)
+                except ConnectionResetError:
+                    logging.warning("forward_data: Connection reset by peer が検出されました。転送を終了します。")
+                    return
                 if not data:
                     logging.debug("forward_data: データがなくなりました。")
                     return
+                # 受信元に応じた転送処理
                 if sock is src:
                     dst.sendall(data)
                 else:
                     src.sendall(data)
-        except Exception as e:
+        except Exception:
             logging.exception("forward_data: 例外が発生しました。")
             return
 
 def main():
-    # systemd により渡されたソケットを標準入力 (fd 0) 経由で取得
     logging.debug("main: systemd から渡されたソケットを取得します。")
     try:
         sock_in = socket.socket(fileno=sys.stdin.fileno())
         peer = sock_in.getpeername()
         logging.info("main: 接続元の情報: %s", peer)
-    except Exception as e:
+    except Exception:
         logging.exception("main: 受け取ったソケットのオープンに失敗しました。")
         sys.exit(1)
 
-    # Docker Compose による Minecraft サーバーの状態確認・起動
     ensure_minecraft_server_running()
-    # サーバーが接続可能になるまで待機
     wait_for_server()
 
-    # Docker Compose で起動したサーバーへの接続を確立
     logging.debug("main: Minecraft サーバー(%s:%d) への接続を試みます。", TARGET_HOST, TARGET_PORT)
     try:
         sock_out = socket.create_connection((TARGET_HOST, TARGET_PORT))
         logging.info("main: Minecraft サーバーへの接続に成功しました。")
-    except Exception as e:
+    except Exception:
         logging.exception("main: Minecraft サーバーへの接続に失敗しました。")
         sys.exit(1)
 
-    # 受け取ったソケット (クライアントからの接続) とサーバーへのソケットでデータを転送
     forward_data(sock_in, sock_out)
     sock_in.close()
     sock_out.close()
