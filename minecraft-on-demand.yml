@@ -114,4 +114,4 @@
 
   handlers:
     - name: systemdをリロードする
-      command: systemctl daemon-reexec
+      command: systemctl daemon-reload
