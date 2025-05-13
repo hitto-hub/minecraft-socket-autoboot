@@ -1,0 +1,9 @@
+[Unit]
+Description=On-demand server up for Minecraft from %I
+
+[Service]
+ExecStart=/opt/minecraft-on-demand/venv/bin/python /opt/minecraft-on-demand/main.py
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=no
